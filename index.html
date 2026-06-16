@@ -117,6 +117,14 @@
 
   .medisBadge{background:#f3effb;border:1px solid #d6c8ef;border-radius:10px;padding:9px 13px;margin:2px 0 12px;font-size:12.5px;color:#4b357d}
   .medisBadge b{color:#5a3da8;font-family:ui-monospace,Menlo,Consolas,monospace}
+  #dxCandidates{position:relative}
+  .whyhint{font-size:10.5px;font-weight:700;color:var(--brand);background:var(--brand-soft);border:1px solid #cfe1f3;border-radius:5px;padding:1px 6px;margin-left:6px;cursor:help}
+  .dxpop{display:none;position:fixed;z-index:60;background:#fff;border:1px solid var(--line2);border-radius:11px;
+    box-shadow:0 12px 34px rgba(20,40,70,.20);padding:12px 14px;font-size:12.5px;color:var(--ink);pointer-events:none}
+  .dxpop .poph{font-size:13.5px;margin-bottom:7px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  .dxpop .popsec{margin-top:8px;line-height:1.55}
+  .dxpop .pl{font-weight:700;color:var(--brand);background:var(--brand-soft);border-radius:5px;padding:1px 7px;font-size:11.5px;margin-right:4px}
+  .dxpop .popc{margin-top:6px;padding:6px 9px;background:var(--soft);border:1px solid var(--line);border-radius:8px;line-height:1.5}
   .inferNote{background:var(--brand-soft);border:1px solid #bcd6f0;border-radius:10px;padding:10px 13px;margin-bottom:14px;font-size:12.5px}
   .inferNote b{color:var(--brand)}
   .field{padding:14px 0;border-top:1px solid var(--line)}
@@ -474,14 +482,15 @@ const FINDINGS=["膿瘍","穿孔","腹膜炎","狭窄","閉塞","破裂","出血
  "潰瘍","水腎","膿胸","気胸","血腫","解離","動脈瘤","塞栓","血栓","梗塞"];
 function recHasFindings(recT){ return FINDINGS.filter(f=>recT.includes(nm(f))); }
 /* 記録全体（術式・所見・ICD名）から臨床的根拠をスコア化：医師の病名がICDに無くても推定できる */
-function evidenceScore(b6, recT, recFind){
+function shortLabel(s){ return nfkc(s).replace(/（[^）]*）/g,"").split(/[　 、]/)[0].slice(0,14); }
+function evidenceScore(b6, recT, recFind, hits){
   const rows=codesFor(b6); let s=0, blob="";
   const opes=[...new Set(rows.map(r=>r.ope))].filter(o=>o&&!/^(なし|あり|その他の手術あり)$/.test(o)).slice(0,40);
-  for(const o of opes){ blob+=" "+o; const c=countHas(recT,o); if(c>=3) s+=Math.min(c,12); } // 術式（膿瘍/穿孔等の所見語を含む）
+  for(const o of opes){ blob+=" "+o; const c=countHas(recT,o); if(c>=3){ s+=Math.min(c,12); if(hits)hits.push("術式「"+shortLabel(o)+"」"); } }
   const sevs=[...new Set(rows.map(r=>r.sev))].filter(Boolean);
-  for(const v of sevs){ blob+=" "+v; const c=countHas(recT,v); if(c>=2) s+=Math.min(c,8)*0.5; }
-  let icn=0; for(const x of (D.icd[b6]||[])){ blob+=" "+x.n; if(icn<6 && countHas(recT,x.n)>=3){ s+=2; icn++; } } // ICD名称（全文）
-  if(recFind.length){ const B=nm(blob); for(const f of recFind){ if(B.includes(nm(f))) s+=2.2; } } // 所見語（膿瘍等）が病名定義に含まれる
+  for(const v of sevs){ blob+=" "+v; const c=countHas(recT,v); if(c>=2){ s+=Math.min(c,8)*0.5; if(hits)hits.push("重症度「"+shortLabel(v)+"」"); } }
+  let icn=0; for(const x of (D.icd[b6]||[])){ blob+=" "+x.n; if(icn<6 && countHas(recT,x.n)>=3){ s+=2; icn++; if(hits)hits.push("ICD名「"+shortLabel(x.n)+"」"); } }
+  if(recFind.length){ const B=nm(blob); for(const f of recFind){ if(B.includes(nm(f))){ s+=2.2; if(hits)hits.push("所見「"+f+"」"); } } }
   return s;
 }
 /* 病名推定：①診断行の病名名称一致 ＋ ②記録全体の臨床的根拠（術式・所見）。診療科で絞る */
@@ -496,37 +505,72 @@ function inferDiseases(){
   const res=[];
   const pool = state.mdc ? (byoumeiByMdc[state.mdc]||[]) : allB6(); // 選択した診療科に絞る
   for(const b6 of pool){
-    const name=byoName(b6); let nameS=0, matched=0, total=0; const seen=new Set();
+    const name=byoName(b6); let nameS=0, matched=0, total=0; const seen=new Set(); const why=[];
     for(const tk of dxTokens(name)){ const t=nm(tk); if(!t||seen.has(t))continue; seen.add(t);
       if(STOPTOK.has(tk)||STOPTOK.has(t)) continue; total++;
-      if(SRC.includes(t)){ nameS += t.length*spec(t); matched++; } }
-    const evid = evidenceScore(b6, recT, recFind);
+      if(SRC.includes(t)){ nameS += t.length*spec(t); matched++; why.push("病名語「"+tk+"」"); } }
+    const evid = evidenceScore(b6, recT, recFind, why);
     if(matched===0 && evid<=0) continue; // 名称も根拠も無ければ除外
     let s = nameS + (matched?matched/Math.max(1,total):0) + evid*(matched>0?0.25:0.7); // 名称があれば補助、無ければ根拠が主役
+    if(malig && /腫瘍|新生物/.test(name) && !/良性/.test(name)) why.push("悪性（癌）の整合");
+    if(benign && /良性|筋腫|腺腫/.test(name)) why.push("良性の整合");
     if(/その他|詳細不明|部位不明|分類されない/.test(name)) s-=4;
     if(malig){ if(/良性/.test(name)) s-=3; else if(/腫瘍|新生物/.test(name)) s+=3; }
     if(benign){ if(/悪性/.test(name)) s-=3; else if(/良性|筋腫|腺腫/.test(name)) s+=3; }
-    if(s>0) res.push({b6, s:Math.round(s*10)/10, byName:matched>0});
+    if(s>0) res.push({b6, s:Math.round(s*10)/10, byName:matched>0, why:[...new Set(why)]});
   }
   res.sort((a,b)=> b.s-a.s || byoName(a.b6).length-byoName(b.b6).length || codesFor(b.b6).length-codesFor(a.b6).length);
   return res.slice(0,12);
 }
+let lastDxList=[];
 function renderDxCandidates(){
-  const list=inferDiseases();
+  const list=inferDiseases(); lastDxList=list;
   if(!list.length){ $("#dxCandidates").innerHTML=`<div class="empty">記録から病名を推定できませんでした。下の検索から選んでください。</div>`;
     $("#manualDx").open=true; return; }
   if(!state.b6) setDisease(list[0].b6); // 最有力を自動選択
   const maxs=list[0].s;
-  $("#dxCandidates").innerHTML=`<div style="font-size:12px;color:var(--sub);margin-bottom:8px">診療科×記録から一致度が高い順。上位を自動選択済みです（クリックで変更）。<br>🔎 印は<b>病名名称が無くても所見・術式から推定</b>した候補です。</div>
-    <div class="dz">`+list.map(({b6,s,byName})=>{
+  $("#dxCandidates").innerHTML=`<div style="font-size:12px;color:var(--sub);margin-bottom:8px">診療科×記録から一致度が高い順。上位を自動選択済みです（クリックで変更）。<br>🔎 印は<b>病名名称が無くても所見・術式から推定</b>した候補。各候補に<b>マウスを乗せると選定根拠と他候補との違い</b>を表示します。</div>
+    <div class="dz">`+list.map(({b6,s,byName},i)=>{
       const m=b6.slice(0,2); const ig=D.icd[b6]||[];
       const top=s===maxs;
-      return `<div class="row ${state.b6===b6?'sel':''}" data-b="${b6}"><span class="b6">${b6}</span>
-        <div><div class="nm">${byoName(b6)}${top?' <span class="sug">推定</span>':''}${!byName?' <span class="sug" style="color:#b9791a">🔎所見</span>':''}</div>
+      return `<div class="row dxrow${state.b6===b6?' sel':''}" data-b="${b6}" data-rank="${i}"><span class="b6">${b6}</span>
+        <div><div class="nm">${byoName(b6)}${top?' <span class="sug">推定</span>':''}${!byName?' <span class="sug" style="color:#b9791a">🔎所見</span>':''} <span class="whyhint">ⓘ根拠</span></div>
         <div class="sb">${DEPT_ICON[m]||''} ${DEPT[m]||''}・MDC${m}　ICD: ${ig.slice(0,3).map(x=>x.c).join(", ")||'—'}</div></div>
         <span class="codes">一致度 ${s}</span></div>`;
-    }).join("")+`</div>`;
-  $$('#dxCandidates .row').forEach(r=>r.onclick=()=>setDisease(r.dataset.b));
+    }).join("")+`</div><div id="dxPop" class="dxpop"></div>`;
+  $$('#dxCandidates .row').forEach(r=>{
+    r.classList.toggle('sel', state.b6===r.dataset.b);
+    r.onclick=()=>setDisease(r.dataset.b);
+    r.onmouseenter=e=>showDxPop(+r.dataset.rank, r);
+    r.onmouseleave=()=>{ const p=$("#dxPop"); if(p)p.style.display="none"; };
+  });
+}
+/* 選定根拠＋他候補との違いをポップオーバー表示 */
+function showDxPop(rank, rowEl){
+  const pop=$("#dxPop"); if(!pop||!lastDxList[rank])return;
+  const cur=lastDxList[rank];
+  const whyTxt = cur.why&&cur.why.length ? cur.why.slice(0,7).join("、 ") : "明示的な一致語なし（所見・術式から総合推定）";
+  let h=`<div class="poph"><b>${byoName(cur.b6)}</b>（${cur.b6}）　一致度 <b>${cur.s}</b>${rank===0?' ／ 最有力':''}</div>
+    <div class="popsec"><span class="pl">選定根拠</span>：${whyTxt}</div>`;
+  const others=lastDxList.filter((_,i)=>i!==rank).slice(0,2);
+  if(others.length){
+    h+=`<div class="popsec"><span class="pl">他候補との違い</span>`;
+    for(const o of others){ const oi=lastDxList.indexOf(o);
+      const diff=cur.why.filter(w=>!(o.why||[]).includes(w)).slice(0,3);
+      const oWhy=(o.why&&o.why.length)?o.why.slice(0,3).join("、"):"根拠弱い";
+      h+=`<div class="popc"><b>${oi+1}位 ${byoName(o.b6)}</b>（${o.s}）：${oWhy}${diff.length?`<br>　→ 本候補の決め手：<b style="color:#1f9d6b">${diff.join("、")}</b>（スコア差 +${Math.round((cur.s-o.s)*10)/10}）`:`（スコア差 +${Math.round((cur.s-o.s)*10)/10}）`}</div>`;
+    }
+    h+=`</div>`;
+  } else { h+=`<div class="popsec" style="color:var(--sub)">他の候補はありません（単独候補）。</div>`; }
+  pop.innerHTML=h;
+  // 位置：ビューポート基準で行の直下（下にはみ出すなら上）
+  const rr=rowEl.getBoundingClientRect();
+  pop.style.display="block";
+  pop.style.width=Math.min(rr.width, window.innerWidth-16)+"px";
+  let top=rr.bottom+6;
+  if(top+pop.offsetHeight>window.innerHeight-8){ const up=rr.top-pop.offsetHeight-6; top=up>8?up:Math.max(8,window.innerHeight-pop.offsetHeight-8); }
+  pop.style.top=top+"px";
+  pop.style.left=Math.max(8, Math.min(rr.left, window.innerWidth-pop.offsetWidth-8))+"px";
 }
 /* ===== ICD-10病名 横断検索（診療科で絞り込み可） ===== */
 function renderDeptFilter(){
