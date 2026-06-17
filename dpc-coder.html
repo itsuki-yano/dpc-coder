@@ -89,6 +89,19 @@
   textarea.sum{width:100%;min-height:200px;border:1px solid var(--line2);border-radius:10px;padding:13px 15px;
     font-size:13.5px;font-family:inherit;line-height:1.75;resize:vertical}
   .pasteHint{font-size:12px;color:var(--sub);margin:6px 2px 0}
+  .aibody{margin-top:10px;border:1px solid #bfe3e0;background:#f1faf9;border-radius:10px;padding:12px 14px}
+  .airow{display:grid;grid-template-columns:110px 1fr;gap:10px;align-items:center;margin-bottom:8px}
+  @media(max-width:560px){.airow{grid-template-columns:1fr}}
+  .airow label{font-size:12.5px;font-weight:700;color:var(--sub)}
+  .airow input{padding:8px 11px;border:1px solid var(--line2);border-radius:8px;font-size:13px;font-family:inherit}
+  .aibtns{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 4px}
+  .aibtns .btn{padding:8px 16px;font-size:13px}
+  .aistatus{font-size:12.5px;margin-top:6px;min-height:0}
+  .aistatus.load{color:var(--brand)} .aistatus.ok{color:var(--green)} .aistatus.err{color:var(--red)}
+  .aihint{font-size:11.5px;color:var(--sub);margin-top:8px;line-height:1.5}
+  #aiResult{margin-top:8px}
+  #aiResult .card{background:#fff;border:1px solid var(--line);border-radius:9px;padding:10px 12px;font-size:12.5px}
+  #aiResult .k{font-weight:700;color:#0f8a8a;margin-right:6px}
   /* パース整理パネル */
   .parse{margin-top:16px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
   .parse .ph{background:var(--soft);padding:10px 14px;font-weight:700;font-size:13px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px}
@@ -258,6 +271,21 @@
 5/2  P)腹腔鏡下虫垂切除術を施行
 5/5  経過良好、退院"></textarea>
         <div class="pasteHint">※ 日付（5/1、2024/5/1、令和6年5月1日 など）を自動認識して時系列に整理します。診断（A）に病名を含めると推定精度が上がります。</div>
+        <details id="aiPanel" style="margin-top:12px">
+          <summary style="cursor:pointer;font-weight:700;font-size:13.5px;color:#0f8a8a">🤖 AIで解析（LM Studio / Qwen）― 記録から病名・手術・処置を抽出</summary>
+          <div class="aibody">
+            <div class="airow"><label>エンドポイント</label><input id="aiEndpoint" placeholder="http://localhost:1234/v1/chat/completions"></div>
+            <div class="airow"><label>モデル</label><input id="aiModel" placeholder="（空欄可。例：qwen2.5-7b-instruct）"></div>
+            <div class="aibtns">
+              <button class="btn" id="aiTest">接続テスト</button>
+              <button class="btn accent" id="aiRun">この記録をAI解析</button>
+            </div>
+            <div id="aiStatus" class="aistatus"></div>
+            <div id="aiResult"></div>
+            <div class="aihint">LM Studio の「Local Server」を起動し、Qwen系モデルを読み込んでおいてください。<br>
+              ※ ブラウザの制約により、<b>https（GitHub Pages）からは http://localhost を呼べません</b>。AI連携は<b>ローカルで開いた場合（ファイルを直接開く / http://localhost で配信）</b>に動作します。</div>
+          </div>
+        </details>
         <div id="parsePanel"></div>
         <div class="navbtns"><button class="btn" id="back1">← 戻る</button>
           <button class="btn primary" id="next1" disabled>病名を推定して次へ →</button></div>
@@ -614,6 +642,80 @@ function renderDiseases(){
 }
 /* ===== 3 SOAP/サマリ ===== */
 function getText(){ return $("#sumText").value||""; }
+
+/* ===== AI解析（LM Studio / OpenAI互換ローカルサーバ） ===== */
+const AI_DEFAULT_EP="http://localhost:1234/v1/chat/completions";
+const AI_SYS="あなたは日本のDPC/PDPS（診断群分類）コーディングを支援する臨床情報抽出アシスタントです。与えられた医師記録・退院サマリから、DPCコーディングに必要な情報のみを、記載に基づいて抽出します。推測で病名を創作せず、記載が無い項目は空配列にします。出力は指定のJSONのみとし、説明文やコードフェンスを付けません。";
+function AI_USER(rec){ return `次の医療記録から抽出し、JSONのみを出力してください。
+
+記録:
+"""
+${rec}
+"""
+
+出力JSON（キーは固定。値は日本語。できるだけ正式な医学用語で）:
+{
+  "主病名": "最も医療資源を投入した傷病名を1つ",
+  "病名候補": ["主病名以外に考えられる病名・併記病名"],
+  "手術": ["実施した術式（例: 腹腔鏡下虫垂切除術, 経皮的冠動脈形成術）"],
+  "処置": ["人工呼吸, 化学療法, IABP, t-PA, 透析 等の主要な処置"],
+  "副傷病": ["入院時併存症・入院後発症（例: 2型糖尿病）"],
+  "重症度": ["穿孔, 腹膜炎, JCS, A-DROPスコア 等の重症度に関わる所見"]
+}`; }
+function aiEndpoint(){ return ($("#aiEndpoint").value||"").trim()||AI_DEFAULT_EP; }
+function aiStatus(msg,cls){ const e=$("#aiStatus"); if(e){ e.className="aistatus "+(cls||""); e.textContent=msg||""; } }
+function aiParseJson(s){ if(!s)return null;
+  let t=s.replace(/```(?:json)?/gi,"").trim();
+  const a=t.indexOf("{"), b=t.lastIndexOf("}"); if(a<0||b<0)return null;
+  try{ return JSON.parse(t.slice(a,b+1)); }catch(_){ return null; } }
+function aiArr(o,k){ const v=o&&o[k]; return Array.isArray(v)?v.filter(x=>x&&String(x).trim()):(v?[String(v)]:[]); }
+function aiSaveCfg(){ try{ localStorage.setItem("dpc_ai",JSON.stringify({ep:$("#aiEndpoint").value,model:$("#aiModel").value})); }catch(_){ } }
+function aiLoadCfg(){ try{ const c=JSON.parse(localStorage.getItem("dpc_ai")||"{}");
+  if($("#aiEndpoint")) $("#aiEndpoint").value=c.ep||AI_DEFAULT_EP;
+  if($("#aiModel")&&c.model) $("#aiModel").value=c.model; }catch(_){ if($("#aiEndpoint"))$("#aiEndpoint").value=AI_DEFAULT_EP; }
+  if(location.protocol==="https:") aiStatus("⚠️ httpsで開いています。ブラウザ制約によりhttp://localhostのLM Studioを呼べません。ファイルを直接開く/ http://localhost で配信してご利用ください。","err"); }
+async function aiTest(){ aiSaveCfg();
+  const url=aiEndpoint().replace(/\/chat\/completions\/?$/,"/models");
+  aiStatus("接続テスト中… "+url,"load");
+  try{ const res=await fetch(url,{method:"GET"}); if(!res.ok)throw new Error("HTTP "+res.status);
+    const d=await res.json(); const ids=(d.data||[]).map(x=>x.id);
+    if(ids.length && !$("#aiModel").value.trim()){ $("#aiModel").value=ids[0]; aiSaveCfg(); }
+    aiStatus("✓ 接続OK。利用可能モデル: "+(ids.join(", ")||"(不明)"),"ok");
+  }catch(e){ aiStatus("✗ 接続失敗: "+e.message+"（LM Studioのサーバ起動・モデル読込をご確認ください）","err"); } }
+async function aiRun(){ aiSaveCfg();
+  const rec=getText().replace(/\n*【AI解析（LM Studio）】[\s\S]*$/,"").trim();
+  if(!rec){ aiStatus("記録を入力してください。","err"); return; }
+  const model=$("#aiModel").value.trim();
+  aiStatus("AI解析中…（モデルにより数秒〜数十秒かかります）","load"); $("#aiRun").disabled=true;
+  try{
+    const body={ model:model||"local-model", temperature:0, max_tokens:800, stream:false,
+      messages:[{role:"system",content:AI_SYS},{role:"user",content:AI_USER(rec)}] };
+    const res=await fetch(aiEndpoint(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    if(!res.ok){ const t=await res.text().catch(()=>''); throw new Error("HTTP "+res.status+" "+t.slice(0,200)); }
+    const data=await res.json();
+    const content=data.choices&&data.choices[0]&&data.choices[0].message?data.choices[0].message.content:"";
+    const obj=aiParseJson(content);
+    if(!obj){ throw new Error("AI応答をJSONとして解釈できませんでした。応答: "+String(content).slice(0,160)); }
+    aiApply(obj, rec);
+    aiStatus("✓ 解析完了。抽出結果を記録に反映しました。下へスクロールして整理結果と推定をご確認ください。","ok");
+  }catch(e){ aiStatus("✗ 解析エラー: "+e.message+" ／ LM Studioのローカルサーバ起動・モデル読込・（httpsではなくローカルで開く）をご確認ください。","err"); }
+  finally{ $("#aiRun").disabled=false; }
+}
+function aiApply(obj, rec){
+  const L=[]; const add=(label,vals)=>{ if(vals.length)L.push(label+"："+vals.join("、")); };
+  if(obj.主病名&&String(obj.主病名).trim()) L.push("主病名："+String(obj.主病名).trim());
+  add("病名候補",aiArr(obj,"病名候補")); add("手術",aiArr(obj,"手術")); add("処置",aiArr(obj,"処置"));
+  add("副傷病",aiArr(obj,"副傷病")); add("重症度",aiArr(obj,"重症度"));
+  $("#sumText").value = rec + "\n\n【AI解析（LM Studio）】\n" + L.join("\n");
+  $("#aiResult").innerHTML=`<div class="card">
+    <div><span class="k">主病名</span>${obj.主病名||"—"}</div>
+    ${aiArr(obj,"手術").length?`<div><span class="k">手術</span>${aiArr(obj,"手術").join("、")}</div>`:""}
+    ${aiArr(obj,"処置").length?`<div><span class="k">処置</span>${aiArr(obj,"処置").join("、")}</div>`:""}
+    ${aiArr(obj,"副傷病").length?`<div><span class="k">副傷病</span>${aiArr(obj,"副傷病").join("、")}</div>`:""}
+    ${aiArr(obj,"重症度").length?`<div><span class="k">重症度</span>${aiArr(obj,"重症度").join("、")}</div>`:""}
+  </div>`;
+  renderParse(); $("#next1").disabled=!getText().trim();
+}
 
 /* 一般処置・治療キーワード（DPC分岐に関係しやすいもの） */
 const PROC_KW=[
@@ -1016,6 +1118,13 @@ function resetAll(){ state.mdc=null;state.b6=null;state.medis=null;resetSel();
   renderDepts();updateRail();go(0); }
 $("#restart").onclick=resetAll;
 $("#hdrReset").onclick=resetAll;
+
+/* AI解析の配線 */
+if($("#aiTest")) $("#aiTest").onclick=aiTest;
+if($("#aiRun")) $("#aiRun").onclick=aiRun;
+if($("#aiEndpoint")) $("#aiEndpoint").onchange=aiSaveCfg;
+if($("#aiModel")) $("#aiModel").onchange=aiSaveCfg;
+aiLoadCfg();
 
 if(D){ renderDepts(); updateRail(); }
 </script>
