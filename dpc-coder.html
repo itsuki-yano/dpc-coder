@@ -282,7 +282,8 @@
             </div>
             <div id="aiStatus" class="aistatus"></div>
             <div id="aiResult"></div>
-            <div class="aihint">LM Studio の「Local Server」を起動し、Qwen系モデルを読み込んでおいてください。<br>
+            <div class="aihint">LM Studio の「Local Server」を起動し、モデルを読み込んでおいてください。<br>
+              ⚡ <b>速度の注意</b>：Qwen3系など<b>思考(reasoning)モデルは1件の解析に数分</b>かかります。高速にするには LM Studio で思考を無効化するか、<b>非思考の軽量モデル（例: qwen2.5-7b-instruct）</b>の使用を推奨します（抽出は軽量モデルでも十分です）。<br>
               ※ ブラウザの制約により、<b>https（GitHub Pages）からは http://localhost を呼べません</b>。AI連携は<b>ローカルで開いた場合（ファイルを直接開く / http://localhost で配信）</b>に動作します。</div>
           </div>
         </details>
@@ -686,19 +687,24 @@ async function aiRun(){ aiSaveCfg();
   const rec=getText().replace(/\n*【AI解析（LM Studio）】[\s\S]*$/,"").trim();
   if(!rec){ aiStatus("記録を入力してください。","err"); return; }
   const model=$("#aiModel").value.trim();
-  aiStatus("AI解析中…（モデルにより数秒〜数十秒かかります）","load"); $("#aiRun").disabled=true;
+  aiStatus("AI解析中…（思考モデル/大型モデルは数十秒〜数分かかります。完了までお待ちください）","load"); $("#aiRun").disabled=true;
+  const t0=Date.now();
   try{
-    const body={ model:model||"local-model", temperature:0, max_tokens:800, stream:false,
+    const body={ model:model||"local-model", temperature:0, max_tokens:3500, stream:false,
       messages:[{role:"system",content:AI_SYS},{role:"user",content:AI_USER(rec)}] };
     const res=await fetch(aiEndpoint(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
     if(!res.ok){ const t=await res.text().catch(()=>''); throw new Error("HTTP "+res.status+" "+t.slice(0,200)); }
     const data=await res.json();
-    const content=data.choices&&data.choices[0]&&data.choices[0].message?data.choices[0].message.content:"";
+    const msg=(data.choices&&data.choices[0]&&data.choices[0].message)||{};
+    let content=msg.content||"";
+    if(!content && msg.reasoning_content) content=msg.reasoning_content; // 思考モデルで本文が空の場合のフォールバック
+    content=content.replace(/<think>[\s\S]*?<\/think>/gi,"").replace(/<\/?think>/gi,""); // <think>除去
     const obj=aiParseJson(content);
-    if(!obj){ throw new Error("AI応答をJSONとして解釈できませんでした。応答: "+String(content).slice(0,160)); }
+    const secs=Math.round((Date.now()-t0)/1000);
+    if(!obj){ throw new Error("AI応答からJSONを取得できませんでした（思考モデルでトークン上限に達した可能性）。LM Studioで『思考(reasoning)を無効化』する、より軽量・非思考のモデル（例: qwen2.5-7b-instruct）を使う、またはContext Lengthを上げてください。応答先頭: "+String(msg.content||msg.reasoning_content||"").slice(0,120)); }
     aiApply(obj, rec);
-    aiStatus("✓ 解析完了。抽出結果を記録に反映しました。下へスクロールして整理結果と推定をご確認ください。","ok");
-  }catch(e){ aiStatus("✗ 解析エラー: "+e.message+" ／ LM Studioのローカルサーバ起動・モデル読込・（httpsではなくローカルで開く）をご確認ください。","err"); }
+    aiStatus("✓ 解析完了（"+secs+"秒）。抽出結果を記録に反映しました。下へスクロールして推定をご確認ください。","ok");
+  }catch(e){ aiStatus("✗ 解析エラー: "+e.message+" ／ LM Studioのサーバ起動・モデル読込・（httpsではなくローカルで開く）をご確認ください。","err"); }
   finally{ $("#aiRun").disabled=false; }
 }
 function aiApply(obj, rec){
