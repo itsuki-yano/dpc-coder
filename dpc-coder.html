@@ -93,7 +93,11 @@
   .airow{display:grid;grid-template-columns:110px 1fr;gap:10px;align-items:center;margin-bottom:8px}
   @media(max-width:560px){.airow{grid-template-columns:1fr}}
   .airow label{font-size:12.5px;font-weight:700;color:var(--sub)}
-  .airow input{padding:8px 11px;border:1px solid var(--line2);border-radius:8px;font-size:13px;font-family:inherit}
+  .airow input,.airow select{padding:8px 11px;border:1px solid var(--line2);border-radius:8px;font-size:13px;font-family:inherit;background:#fff;color:var(--ink)}
+  .aiwhy{margin-top:8px;background:#f1faf9;border:1px solid #bfe3e0;border-radius:10px;padding:11px 14px;font-size:13px;line-height:1.7;color:var(--ink)}
+  .aiwhy b{color:#0f8a8a}
+  .aiwhy.load{color:var(--brand);background:var(--soft);border-color:var(--line)}
+  .aiwhy.err{color:var(--red);background:#fdecea;border-color:#f5c2bc}
   .aibtns{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 4px}
   .aibtns .btn{padding:8px 16px;font-size:13px}
   .aistatus{font-size:12.5px;margin-top:6px;min-height:0}
@@ -275,9 +279,10 @@
           <summary style="cursor:pointer;font-weight:700;font-size:13.5px;color:#0f8a8a">🤖 AIで解析（LM Studio / Qwen）― 記録から病名・手術・処置を抽出</summary>
           <div class="aibody">
             <div class="airow"><label>エンドポイント</label><input id="aiEndpoint" placeholder="http://localhost:1234/v1/chat/completions"></div>
-            <div class="airow"><label>モデル</label><input id="aiModel" placeholder="（空欄可。例：qwen2.5-7b-instruct）"></div>
+            <div class="airow"><label>モデル</label>
+              <select id="aiModel"><option value="">（接続テストでモデル取得）</option></select></div>
             <div class="aibtns">
-              <button class="btn" id="aiTest">接続テスト</button>
+              <button class="btn" id="aiTest">接続テスト／モデル更新</button>
               <button class="btn accent" id="aiRun">この記録をAI解析</button>
             </div>
             <div id="aiStatus" class="aistatus"></div>
@@ -297,6 +302,8 @@
         <p class="lead">記録から推定した病名候補です。該当するものをクリックして選択してください。<b>病名コード（MEDIS標準病名 約27,000件）</b>または<b>ICD-10病名</b>から直接選ぶこともできます。</p>
         <div id="medisBadge"></div>
         <div id="dxCandidates"></div>
+        <div style="margin:10px 0 2px"><button class="btn" id="aiWhyBtn" style="border-color:#0f8a8a;color:#0f8a8a">🤖 AIで選定根拠を解説（LM Studio）</button></div>
+        <div id="aiWhy"></div>
         <details id="medisDx" style="margin-top:12px" open>
           <summary style="cursor:pointer;font-weight:700;font-size:13.5px;color:#7a5cc0">🆔 病名コードで検索（MEDIS標準病名マスター Ver.5.18・約27,000件）</summary>
           <div style="margin-top:10px">
@@ -395,7 +402,7 @@ function translate(b6,k,val){
 /* ===== 共通：病名の選択 ===== */
 function setDisease(b6, medis){
   const changed = state.b6!==b6;
-  if(changed){ state.b6=b6; state.mdc=b6.slice(0,2); resetSel(); }
+  if(changed){ state.b6=b6; state.mdc=b6.slice(0,2); resetSel(); if($("#aiWhy"))$("#aiWhy").innerHTML=""; }
   if(medis) state.medis=medis;
   else if(changed) state.medis=lookupMedis(rawPrimary()); // 記録の診断から代表病名コードを推定
   $("#next2").disabled=false;
@@ -685,42 +692,74 @@ function aiStr(v){ if(v==null)return "";
 function aiMain(v){ if(Array.isArray(v))return aiStr(v.find(x=>x)||""); return aiStr(v); }
 function aiArr(o,k){ const v=o&&o[k]; if(v==null)return [];
   return (Array.isArray(v)?v:[v]).map(aiStr).map(s=>s.trim()).filter(Boolean); }
+let aiSavedModel="";
 function aiSaveCfg(){ try{ localStorage.setItem("dpc_ai",JSON.stringify({ep:$("#aiEndpoint").value,model:$("#aiModel").value})); }catch(_){ } }
 function aiLoadCfg(){ try{ const c=JSON.parse(localStorage.getItem("dpc_ai")||"{}");
-  if($("#aiEndpoint")) $("#aiEndpoint").value=c.ep||AI_DEFAULT_EP;
-  if($("#aiModel")&&c.model) $("#aiModel").value=c.model; }catch(_){ if($("#aiEndpoint"))$("#aiEndpoint").value=AI_DEFAULT_EP; }
-  if(location.protocol==="https:") aiStatus("⚠️ httpsで開いています。ブラウザ制約によりhttp://localhostのLM Studioを呼べません。ファイルを直接開く/ http://localhost で配信してご利用ください。","err"); }
-async function aiTest(){ aiSaveCfg();
+  if($("#aiEndpoint")) $("#aiEndpoint").value=c.ep||AI_DEFAULT_EP; aiSavedModel=c.model||""; }catch(_){ if($("#aiEndpoint"))$("#aiEndpoint").value=AI_DEFAULT_EP; }
+  if(location.protocol==="https:"){ aiStatus("⚠️ httpsで開いています。ブラウザ制約によりhttp://localhostのLM Studioを呼べません。ファイルを直接開く/ http://localhost で配信してご利用ください。","err"); }
+  else { aiFetchModels(true); } // 起動時に静かにモデル一覧を取得（サーバ未起動なら無視）
+}
+/* 除外：埋め込み/リランカ等はモデル選択から外す */
+function aiUsableModel(id){ return !/embed|rerank|bge|nomic/i.test(id); }
+function aiPopulateModels(ids){ const sel=$("#aiModel"); if(!sel)return;
+  const list=ids.filter(aiUsableModel); const cur=sel.value||aiSavedModel;
+  sel.innerHTML = list.length ? list.map(id=>`<option value="${id}">${id}</option>`).join("")
+    : `<option value="">（モデル未読込：LM Studioでモデルを読み込んでください）</option>`;
+  if(list.length){ sel.value = (cur && list.includes(cur))?cur : list[0]; aiSaveCfg(); } }
+async function aiFetchModels(silent){
   const url=aiEndpoint().replace(/\/chat\/completions\/?$/,"/models");
-  aiStatus("接続テスト中… "+url,"load");
+  if(!silent) aiStatus("モデル取得中… "+url,"load");
   try{ const res=await fetch(url,{method:"GET"}); if(!res.ok)throw new Error("HTTP "+res.status);
     const d=await res.json(); const ids=(d.data||[]).map(x=>x.id);
-    if(ids.length && !$("#aiModel").value.trim()){ $("#aiModel").value=ids[0]; aiSaveCfg(); }
-    aiStatus("✓ 接続OK。利用可能モデル: "+(ids.join(", ")||"(不明)"),"ok");
-  }catch(e){ aiStatus("✗ 接続失敗: "+e.message+"（LM Studioのサーバ起動・モデル読込をご確認ください）","err"); } }
+    aiPopulateModels(ids);
+    if(!silent) aiStatus("✓ 接続OK。モデルを取得しました（"+ids.filter(aiUsableModel).length+"件）。下のモデル欄から選択できます。","ok");
+    return true;
+  }catch(e){ if(!silent) aiStatus("✗ 接続失敗: "+e.message+"（LM Studioのサーバ起動・モデル読込をご確認ください）","err"); return false; } }
+function aiTest(){ aiSaveCfg(); return aiFetchModels(false); }
+/* 共通：チャット補完を呼んでクリーンな本文を返す（思考モデルにも対応） */
+async function aiChat(messages, maxTokens){
+  const model=($("#aiModel").value||"").trim()||"local-model";
+  const body={ model, temperature:0, max_tokens:maxTokens||1800, stream:false, messages };
+  const res=await fetch(aiEndpoint(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  if(!res.ok){ const t=await res.text().catch(()=>''); throw new Error("HTTP "+res.status+" "+t.slice(0,200)); }
+  const data=await res.json(); const msg=(data.choices&&data.choices[0]&&data.choices[0].message)||{};
+  let c=msg.content||""; if(!c && msg.reasoning_content) c=msg.reasoning_content;
+  return c.replace(/<think>[\s\S]*?<\/think>/gi,"").replace(/<\/?think>/gi,"").trim();
+}
+function htmlEsc(s){ return String(s).replace(/[&<>]/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[m])); }
 async function aiRun(){ aiSaveCfg();
   const rec=getText().replace(/\n*【AI解析（LM Studio）】[\s\S]*$/,"").trim();
   if(!rec){ aiStatus("記録を入力してください。","err"); return; }
-  const model=$("#aiModel").value.trim();
+  if(!($("#aiModel").value||"").trim()){ aiStatus("モデルを選択してください（「接続テスト／モデル更新」で取得）。","err"); return; }
   aiStatus("AI解析中…（思考モデル/大型モデルは数十秒〜数分かかります。完了までお待ちください）","load"); $("#aiRun").disabled=true;
   const t0=Date.now();
   try{
-    const body={ model:model||"local-model", temperature:0, max_tokens:3500, stream:false,
-      messages:[{role:"system",content:AI_SYS},{role:"user",content:AI_USER(rec)}] };
-    const res=await fetch(aiEndpoint(),{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
-    if(!res.ok){ const t=await res.text().catch(()=>''); throw new Error("HTTP "+res.status+" "+t.slice(0,200)); }
-    const data=await res.json();
-    const msg=(data.choices&&data.choices[0]&&data.choices[0].message)||{};
-    let content=msg.content||"";
-    if(!content && msg.reasoning_content) content=msg.reasoning_content; // 思考モデルで本文が空の場合のフォールバック
-    content=content.replace(/<think>[\s\S]*?<\/think>/gi,"").replace(/<\/?think>/gi,""); // <think>除去
+    const content=await aiChat([{role:"system",content:AI_SYS},{role:"user",content:AI_USER(rec)}],3500);
     const obj=aiParseJson(content);
     const secs=Math.round((Date.now()-t0)/1000);
-    if(!obj){ throw new Error("AI応答からJSONを取得できませんでした（思考モデルでトークン上限に達した可能性）。LM Studioで『思考(reasoning)を無効化』する、より軽量・非思考のモデル（例: qwen2.5-7b-instruct）を使う、またはContext Lengthを上げてください。応答先頭: "+String(msg.content||msg.reasoning_content||"").slice(0,120)); }
+    if(!obj){ throw new Error("AI応答からJSONを取得できませんでした（思考モデルでトークン上限に達した可能性）。LM Studioで『思考(reasoning)を無効化』する、より軽量・非思考のモデル（例: qwen2.5-7b-instruct）を使う、またはContext Lengthを上げてください。応答先頭: "+String(content).slice(0,120)); }
     aiApply(obj, rec);
     aiStatus("✓ 解析完了（"+secs+"秒）。抽出結果を記録に反映しました。下へスクロールして推定をご確認ください。","ok");
   }catch(e){ aiStatus("✗ 解析エラー: "+e.message+" ／ LM Studioのサーバ起動・モデル読込・（httpsではなくローカルで開く）をご確認ください。","err"); }
   finally{ $("#aiRun").disabled=false; }
+}
+/* 選定根拠をAIに解説させる */
+async function aiExplain(){
+  if(!state.b6){ $("#aiWhy").innerHTML=`<div class="aiwhy err">先に病名を選択してください。</div>`; return; }
+  if(!($("#aiModel").value||"").trim()){ $("#aiWhy").innerHTML=`<div class="aiwhy err">AIモデルを選択してください（「② 記録入力」の🤖パネルで接続テスト）。</div>`; return; }
+  const rec=getText().replace(/\n*【AI解析（LM Studio）】[\s\S]*$/,"").trim();
+  if(!rec){ $("#aiWhy").innerHTML=`<div class="aiwhy err">記録が空です。</div>`; return; }
+  const cands=(lastDxList||[]).slice(0,3).map((x,i)=>`${i+1}位「${byoName(x.b6)}」(一致度${x.s})`).join("、");
+  const sys="あなたは日本のDPC/PDPSコーディングに精通した臨床医・診療情報管理士です。簡潔で正確な日本語の説明のみを行い、前置きや繰り返しはしません。";
+  const user=`次の医療記録について、DPC上の「最も医療資源を投入した傷病名（主病名）」を「${byoName(state.b6)}」と判断する根拠を、記録中の症状・所見・検査・術式・経過の記載に基づいて説明してください。あわせて、他の候補（${cands||"なし"}）ではなくこの病名を選ぶ決め手も述べてください。200〜300字程度の説明文のみ（JSON・箇条書き記号は不要）。\n\n記録:\n"""\n${rec}\n"""`;
+  $("#aiWhy").innerHTML=`<div class="aiwhy load">🤖 AIが選定根拠を解説中…（モデルにより数秒〜数分）</div>`;
+  $("#aiWhyBtn").disabled=true; const t0=Date.now();
+  try{ const txt=await aiChat([{role:"system",content:sys},{role:"user",content:user}],1800);
+    if(!txt) throw new Error("空の応答でした（トークン上限/モデル設定をご確認ください）。");
+    const secs=Math.round((Date.now()-t0)/1000);
+    $("#aiWhy").innerHTML=`<div class="aiwhy"><b>🤖 AIによる選定根拠（${byoName(state.b6)}・${secs}秒）</b><br>${htmlEsc(txt).replace(/\n/g,"<br>")}</div>`;
+  }catch(e){ $("#aiWhy").innerHTML=`<div class="aiwhy err">✗ ${htmlEsc(e.message)} ／ LM Studioのサーバ起動・モデル選択・（ローカルで開く）をご確認ください。</div>`; }
+  finally{ $("#aiWhyBtn").disabled=false; }
 }
 function aiApply(obj, rec){
   const L=[]; const add=(label,vals)=>{ if(vals.length)L.push(label+"："+vals.join("、")); };
@@ -1135,7 +1174,7 @@ function resetAll(){ state.mdc=null;state.b6=null;state.medis=null;resetSel();
   $("#sumText").value="";$("#parsePanel").innerHTML="";$("#dxCandidates").innerHTML="";$("#medisBadge").innerHTML="";
   if($("#medisSearch"))$("#medisSearch").value="";if($("#medisList"))$("#medisList").innerHTML="";
   $("#dzSearch").value="";$("#next0").disabled=true;$("#next1").disabled=true;$("#next2").disabled=true;
-  if($("#manualDx"))$("#manualDx").open=false;
+  if($("#manualDx"))$("#manualDx").open=false; if($("#aiWhy"))$("#aiWhy").innerHTML="";
   renderDepts();updateRail();go(0); }
 $("#restart").onclick=resetAll;
 $("#hdrReset").onclick=resetAll;
@@ -1143,6 +1182,7 @@ $("#hdrReset").onclick=resetAll;
 /* AI解析の配線 */
 if($("#aiTest")) $("#aiTest").onclick=aiTest;
 if($("#aiRun")) $("#aiRun").onclick=aiRun;
+if($("#aiWhyBtn")) $("#aiWhyBtn").onclick=aiExplain;
 if($("#aiEndpoint")) $("#aiEndpoint").onchange=aiSaveCfg;
 if($("#aiModel")) $("#aiModel").onchange=aiSaveCfg;
 aiLoadCfg();
