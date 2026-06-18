@@ -654,14 +654,20 @@ function AI_USER(rec){ return `次の医療記録から抽出し、JSONのみを
 ${rec}
 """
 
-出力JSON（キーは固定。値は日本語。できるだけ正式な医学用語で）:
+抽出ルール:
+- 主病名は「検査所見の文言」ではなく確定診断としての病名にする（例: 虫垂腫大→急性虫垂炎）。最も医療資源を投入した病名を1つ。
+- 副傷病には既往歴・併存症・入院後発症も含める（例: 2型糖尿病）。
+- 重症度には穿孔・腹膜炎・膿瘍・JCS・A-DROP等を含める。
+- 各値は「文字列の配列」にする（オブジェクトにしない）。できるだけ正式な医学用語で。無い項目は空配列。
+
+出力JSON（キーは固定。各値は日本語の文字列。手術/処置/副傷病/重症度/病名候補は文字列の配列）:
 {
-  "主病名": "最も医療資源を投入した傷病名を1つ",
-  "病名候補": ["主病名以外に考えられる病名・併記病名"],
-  "手術": ["実施した術式（例: 腹腔鏡下虫垂切除術, 経皮的冠動脈形成術）"],
-  "処置": ["人工呼吸, 化学療法, IABP, t-PA, 透析 等の主要な処置"],
-  "副傷病": ["入院時併存症・入院後発症（例: 2型糖尿病）"],
-  "重症度": ["穿孔, 腹膜炎, JCS, A-DROPスコア 等の重症度に関わる所見"]
+  "主病名": "病名を1つ",
+  "病名候補": ["..."],
+  "手術": ["腹腔鏡下虫垂切除術 等の術式名"],
+  "処置": ["人工呼吸, 化学療法, IABP, t-PA, 透析 等"],
+  "副傷病": ["2型糖尿病 等の既往・併存症"],
+  "重症度": ["穿孔, 腹膜炎, JCS, A-DROP 等"]
 }`; }
 function aiEndpoint(){ return ($("#aiEndpoint").value||"").trim()||AI_DEFAULT_EP; }
 function aiStatus(msg,cls){ const e=$("#aiStatus"); if(e){ e.className="aistatus "+(cls||""); e.textContent=msg||""; } }
@@ -669,7 +675,16 @@ function aiParseJson(s){ if(!s)return null;
   let t=s.replace(/```(?:json)?/gi,"").trim();
   const a=t.indexOf("{"), b=t.lastIndexOf("}"); if(a<0||b<0)return null;
   try{ return JSON.parse(t.slice(a,b+1)); }catch(_){ return null; } }
-function aiArr(o,k){ const v=o&&o[k]; return Array.isArray(v)?v.filter(x=>x&&String(x).trim()):(v?[String(v)]:[]); }
+/* 任意の値を文字列化（オブジェクト{名称:..}や配列にも対応） */
+function aiStr(v){ if(v==null)return "";
+  if(typeof v==="string")return v.trim();
+  if(typeof v==="number"||typeof v==="boolean")return String(v);
+  if(Array.isArray(v))return v.map(aiStr).filter(Boolean).join("、");
+  if(typeof v==="object")return aiStr(v.名称||v.name||v.value||v.病名||v.手術名||v.text||Object.values(v).find(x=>x)||"");
+  return String(v); }
+function aiMain(v){ if(Array.isArray(v))return aiStr(v.find(x=>x)||""); return aiStr(v); }
+function aiArr(o,k){ const v=o&&o[k]; if(v==null)return [];
+  return (Array.isArray(v)?v:[v]).map(aiStr).map(s=>s.trim()).filter(Boolean); }
 function aiSaveCfg(){ try{ localStorage.setItem("dpc_ai",JSON.stringify({ep:$("#aiEndpoint").value,model:$("#aiModel").value})); }catch(_){ } }
 function aiLoadCfg(){ try{ const c=JSON.parse(localStorage.getItem("dpc_ai")||"{}");
   if($("#aiEndpoint")) $("#aiEndpoint").value=c.ep||AI_DEFAULT_EP;
@@ -709,12 +724,12 @@ async function aiRun(){ aiSaveCfg();
 }
 function aiApply(obj, rec){
   const L=[]; const add=(label,vals)=>{ if(vals.length)L.push(label+"："+vals.join("、")); };
-  if(obj.主病名&&String(obj.主病名).trim()) L.push("主病名："+String(obj.主病名).trim());
+  const main=aiMain(obj.主病名); if(main) L.push("主病名："+main);
   add("病名候補",aiArr(obj,"病名候補")); add("手術",aiArr(obj,"手術")); add("処置",aiArr(obj,"処置"));
   add("副傷病",aiArr(obj,"副傷病")); add("重症度",aiArr(obj,"重症度"));
   $("#sumText").value = rec + "\n\n【AI解析（LM Studio）】\n" + L.join("\n");
   $("#aiResult").innerHTML=`<div class="card">
-    <div><span class="k">主病名</span>${obj.主病名||"—"}</div>
+    <div><span class="k">主病名</span>${aiMain(obj.主病名)||"—"}</div>
     ${aiArr(obj,"手術").length?`<div><span class="k">手術</span>${aiArr(obj,"手術").join("、")}</div>`:""}
     ${aiArr(obj,"処置").length?`<div><span class="k">処置</span>${aiArr(obj,"処置").join("、")}</div>`:""}
     ${aiArr(obj,"副傷病").length?`<div><span class="k">副傷病</span>${aiArr(obj,"副傷病").join("、")}</div>`:""}
